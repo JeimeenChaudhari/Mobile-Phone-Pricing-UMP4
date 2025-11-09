@@ -7,6 +7,7 @@ import plotly.graph_objects as go
 import shap
 import matplotlib.pyplot as plt
 from sklearn.metrics.pairwise import euclidean_distances
+import os
 
 # Page Configuration
 st.set_page_config(
@@ -24,16 +25,30 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Load artifacts
+# Load artifacts with error handling
 @st.cache_resource
 def load_artifacts():
-    with open('price_model.pkl', 'rb') as f:
-        model = pickle.load(f)
-    with open('scaler.pkl', 'rb') as f:
-        scaler = pickle.load(f)
-    with open('data.pkl', 'rb') as f:
-        data = pickle.load(f)
-    return model, scaler, data
+    required_files = ['price_model.pkl', 'scaler.pkl', 'data.pkl']
+    missing_files = [f for f in required_files if not os.path.exists(f)]
+    
+    if missing_files:
+        st.error(f"❌ Missing required files: {', '.join(missing_files)}")
+        st.info("Please ensure the following files are in your repository:")
+        for file in required_files:
+            st.write(f"- {file}")
+        st.stop()
+    
+    try:
+        with open('price_model.pkl', 'rb') as f:
+            model = pickle.load(f)
+        with open('scaler.pkl', 'rb') as f:
+            scaler = pickle.load(f)
+        with open('data.pkl', 'rb') as f:
+            data = pickle.load(f)
+        return model, scaler, data
+    except Exception as e:
+        st.error(f"❌ Error loading files: {str(e)}")
+        st.stop()
 
 model, scaler, data = load_artifacts()
 
@@ -234,136 +249,142 @@ else:
         st.dataframe(pd.DataFrame(summary_data), use_container_width=True, hide_index=True)
     
     if predict_button:
-        # Prepare input data
-        input_df = pd.DataFrame([user_inputs])
-        input_df = input_df[feature_cols]  # Ensure correct order
-        
-        # Scale input
-        input_scaled = scaler.transform(input_df)
-        
-        # Predict
-        prediction = model.predict(input_scaled)[0]
-        probabilities = model.predict_proba(input_scaled)[0]
-        
-        with col2:
-            st.markdown("### 🎯 Prediction Result")
-            st.markdown(f"### Predicted Price Range: **{PRICE_LABELS[prediction]}**")
+        try:
+            # Prepare input data
+            input_df = pd.DataFrame([user_inputs])
+            input_df = input_df[feature_cols]  # Ensure correct order
             
-            # Probability distribution
-            prob_df = pd.DataFrame({
-                'Price Range': [PRICE_LABELS[i] for i in range(4)],
-                'Probability': probabilities
-            })
+            # Scale input
+            input_scaled = scaler.transform(input_df)
             
-            fig_prob = px.bar(
-                prob_df,
-                x='Price Range',
-                y='Probability',
-                color='Probability',
-                color_continuous_scale='Blues',
-                title='Confidence Distribution'
-            )
-            fig_prob.update_layout(height=300, showlegend=False)
-            st.plotly_chart(fig_prob, use_container_width=True)
-        
-        st.divider()
-        
-        # SHAP Explanation
-        st.markdown("### 🧠 Features Driving this Price Prediction")
-        st.markdown("**SHAP analysis showing feature contributions**")
-        
-        with st.spinner("Generating explainability analysis..."):
-            # Create SHAP explainer
-            explainer = shap.TreeExplainer(model)
-            shap_values = explainer.shap_values(input_scaled)
+            # Predict
+            prediction = model.predict(input_scaled)[0]
+            probabilities = model.predict_proba(input_scaled)[0]
             
-            # Get SHAP values for the predicted class
-            if isinstance(shap_values, list):
-                shap_vals_class = shap_values[prediction][0]
-                expected_val = explainer.expected_value[prediction]
-            else:
-                shap_vals_class = shap_values[0, :, prediction]
-                expected_val = explainer.expected_value[prediction]
-            
-            # Create waterfall plot (better for Streamlit than force plot)
-            shap_explanation = shap.Explanation(
-                values=shap_vals_class,
-                base_values=expected_val,
-                data=input_df.iloc[0].values,
-                feature_names=input_df.columns.tolist()
-            )
-            
-            # Display waterfall plot
-            fig_shap, ax = plt.subplots(figsize=(10, 8))
-            shap.plots.waterfall(shap_explanation, show=False)
-            st.pyplot(fig_shap, bbox_inches='tight')
-            plt.close()
-        
-        st.divider()
-        
-        # Competitor Analysis
-        st.markdown("### 🏆 Closest Competitors in this Price Segment")
-        st.markdown(f"**Finding similar devices in the {PRICE_LABELS[prediction]} category**")
-        
-        # Filter data by predicted price range
-        same_price_data = data[data['price_range'] == prediction].copy()
-        
-        if len(same_price_data) > 0:
-            # Prepare same price data (drop price_range for distance calculation)
-            X_competitors = same_price_data.drop('price_range', axis=1)
-            X_competitors_scaled = scaler.transform(X_competitors)
-            
-            # Calculate Euclidean distances
-            distances = euclidean_distances(input_scaled, X_competitors_scaled)[0]
-            
-            # Get top 3 closest competitors
-            top_indices = np.argsort(distances)[:3]
-            
-            competitors = same_price_data.iloc[top_indices].copy()
-            competitors['Similarity Score'] = 100 - (distances[top_indices] / distances.max() * 100)
-            
-            # Display competitors
-            display_cols = ['ram', 'battery_power', 'int_memory', 'px_density', 
-                          'total_cameras', 'screen_area', 'Similarity Score']
-            
-            competitors_display = competitors[display_cols].copy()
-            competitors_display.columns = ['RAM (MB)', 'Battery (mAh)', 'Memory (GB)', 
-                                          'Pixel Density', 'Cameras (MP)', 'Screen Area (cm²)', 
-                                          'Similarity (%)']
-            
-            competitors_display = competitors_display.round(2)
-            
-            st.dataframe(competitors_display, use_container_width=True, hide_index=True)
-            
-            # Competitive positioning chart
-            st.markdown("#### 📍 Competitive Positioning")
-            
-            comp_plot_data = pd.concat([
-                pd.DataFrame({
-                    'RAM': [user_inputs['ram']],
-                    'Battery Power': [user_inputs['battery_power']],
-                    'Type': ['Your Device']
-                }),
-                pd.DataFrame({
-                    'RAM': competitors['ram'].values,
-                    'Battery Power': competitors['battery_power'].values,
-                    'Type': ['Competitor'] * len(competitors)
+            with col2:
+                st.markdown("### 🎯 Prediction Result")
+                st.markdown(f"### Predicted Price Range: **{PRICE_LABELS[prediction]}**")
+                
+                # Probability distribution
+                prob_df = pd.DataFrame({
+                    'Price Range': [PRICE_LABELS[i] for i in range(4)],
+                    'Probability': probabilities
                 })
-            ])
+                
+                fig_prob = px.bar(
+                    prob_df,
+                    x='Price Range',
+                    y='Probability',
+                    color='Probability',
+                    color_continuous_scale='Blues',
+                    title='Confidence Distribution'
+                )
+                fig_prob.update_layout(height=300, showlegend=False)
+                st.plotly_chart(fig_prob, use_container_width=True)
             
-            fig_comp = px.scatter(
-                comp_plot_data,
-                x='RAM',
-                y='Battery Power',
-                color='Type',
-                size=[500] + [300]*len(competitors),
-                color_discrete_map={'Your Device': '#ff7f0e', 'Competitor': '#1f77b4'},
-                title='Your Device vs Closest Competitors'
-            )
-            fig_comp.update_layout(height=400)
-            st.plotly_chart(fig_comp, use_container_width=True)
-        else:
-            st.warning("No competitors found in this price range.")
+            st.divider()
+            
+            # SHAP Explanation
+            st.markdown("### 🧠 Features Driving this Price Prediction")
+            st.markdown("**SHAP analysis showing feature contributions**")
+            
+            with st.spinner("Generating explainability analysis..."):
+                # Create SHAP explainer
+                explainer = shap.TreeExplainer(model)
+                shap_values = explainer.shap_values(input_scaled)
+                
+                # Get SHAP values for the predicted class
+                if isinstance(shap_values, list):
+                    shap_vals_class = shap_values[prediction][0]
+                    expected_val = explainer.expected_value[prediction]
+                else:
+                    shap_vals_class = shap_values[0, :, prediction]
+                    expected_val = explainer.expected_value[prediction]
+                
+                # Create waterfall plot (better for Streamlit than force plot)
+                shap_explanation = shap.Explanation(
+                    values=shap_vals_class,
+                    base_values=expected_val,
+                    data=input_df.iloc[0].values,
+                    feature_names=input_df.columns.tolist()
+                )
+                
+                # Display waterfall plot
+                fig_shap, ax = plt.subplots(figsize=(10, 8))
+                shap.plots.waterfall(shap_explanation, show=False)
+                st.pyplot(fig_shap, bbox_inches='tight')
+                plt.close()
+            
+            st.divider()
+            
+            # Competitor Analysis
+            st.markdown("### 🏆 Closest Competitors in this Price Segment")
+            st.markdown(f"**Finding similar devices in the {PRICE_LABELS[prediction]} category**")
+            
+            # Filter data by predicted price range
+            same_price_data = data[data['price_range'] == prediction].copy()
+            
+            if len(same_price_data) > 0:
+                # Prepare same price data (drop price_range for distance calculation)
+                X_competitors = same_price_data.drop('price_range', axis=1)
+                X_competitors_scaled = scaler.transform(X_competitors)
+                
+                # Calculate Euclidean distances
+                distances = euclidean_distances(input_scaled, X_competitors_scaled)[0]
+                
+                # Get top 3 closest competitors
+                top_indices = np.argsort(distances)[:3]
+                
+                competitors = same_price_data.iloc[top_indices].copy()
+                competitors['Similarity Score'] = 100 - (distances[top_indices] / distances.max() * 100)
+                
+                # Display competitors
+                display_cols = ['ram', 'battery_power', 'int_memory', 'px_density', 
+                              'total_cameras', 'screen_area', 'Similarity Score']
+                
+                competitors_display = competitors[display_cols].copy()
+                competitors_display.columns = ['RAM (MB)', 'Battery (mAh)', 'Memory (GB)', 
+                                              'Pixel Density', 'Cameras (MP)', 'Screen Area (cm²)', 
+                                              'Similarity (%)']
+                
+                competitors_display = competitors_display.round(2)
+                
+                st.dataframe(competitors_display, use_container_width=True, hide_index=True)
+                
+                # Competitive positioning chart
+                st.markdown("#### 🔍 Competitive Positioning")
+                
+                comp_plot_data = pd.concat([
+                    pd.DataFrame({
+                        'RAM': [user_inputs['ram']],
+                        'Battery Power': [user_inputs['battery_power']],
+                        'Type': ['Your Device']
+                    }),
+                    pd.DataFrame({
+                        'RAM': competitors['ram'].values,
+                        'Battery Power': competitors['battery_power'].values,
+                        'Type': ['Competitor'] * len(competitors)
+                    })
+                ])
+                
+                fig_comp = px.scatter(
+                    comp_plot_data,
+                    x='RAM',
+                    y='Battery Power',
+                    color='Type',
+                    size=[500] + [300]*len(competitors),
+                    color_discrete_map={'Your Device': '#ff7f0e', 'Competitor': '#1f77b4'},
+                    title='Your Device vs Closest Competitors'
+                )
+                fig_comp.update_layout(height=400)
+                st.plotly_chart(fig_comp, use_container_width=True)
+            else:
+                st.warning("No competitors found in this price range.")
+        
+        except Exception as e:
+            st.error(f"❌ An error occurred during prediction: {str(e)}")
+            st.info("Please check that your model and scaler are compatible with the input data.")
+    
     else:
         with col2:
             st.info("👈 Configure phone specifications and click 'Predict Price Range' to see results")
